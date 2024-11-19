@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Enhanced Portfolio Simulation with Top 20% Stock Selection and Visualization
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+import joblib
+from tqdm import tqdm
+
+# 固定初始参数
+INIT_FUND = 1e9
+RISK_FREE_RATE = 0.01  # 假设年化无风险利率为1%
+OUTPUT_FILE = "results_dynamic_save.csv"
+
+# 读取数据
+test_data_path = "E:/forestregressor/stock_sma_1000.csv"
+print("Loading data...")
+test_data = pd.read_csv(test_data_path, index_col=0)
+test_data = test_data.iloc[47627:59484, :].copy()
+
+# 加载模型
+model_path = "E:/forestregressor/trained_rf_model.pkl"  # 替换为你的模型文件路径
+rf_model = joblib.load(model_path)
+print("模型加载成功")
+
+# 计算 Market Benchmark
+average_price = test_data.mean(axis=1)
+market_benchmark = (average_price / average_price.iloc[0]) * INIT_FUND
+
+# 初始化交易参数
+TRANSACTION_COST = 0.001
+BUY_THRESHOLD = 0.02
+SELL_THRESHOLD = -0.01
+
+cash = INIT_FUND
+portfolio = {}
+total_assets = []
+cash_history = []
+portfolio_size_history = []
+trade_log = []
+selected_stock_history = []
+
+# 开始模拟交易
+print("Simulating trading...")
+for time_step in tqdm(range(100, len(test_data), 100), desc="Trading Simulation (1000-step intervals)"):
+    current_prices = test_data.iloc[time_step]
+    past_prices = test_data.iloc[:time_step]
+
+    # 计算特征
+    returns = past_prices.pct_change().dropna()
+    features = pd.DataFrame({
+        "mean_return": returns.mean(),
+        "volatility": returns.std(),
+    }).reset_index(drop=True)
+
+    # 模型预测
+    X_test = features[['mean_return', 'volatility']]
+    features['predicted_return'] = rf_model.predict(X_test)
+
+    # 选择前20%预测收益最高的股票
+    num_stocks_to_buy = max(1, int(0.2 * len(features)))
+    top_stocks = features.sort_values(by='predicted_return', ascending=False).head(num_stocks_to_buy)
+    
+    # 筛选交易的股票
+    selected_stocks = []
+    available_cash = cash * 0.9
+    for stock in top_stocks.index:
+        if top_stocks.loc[stock, 'predicted_return'] > BUY_THRESHOLD and stock not in portfolio:
+            buy_amount = available_cash * 0.05
+            shares_to_buy = buy_amount / current_prices[stock]
+            portfolio[stock] = shares_to_buy
+            cash -= buy_amount * (1 + TRANSACTION_COST)
+            trade_log.append({'time_step': time_step, 'action': 'buy', 'stock': stock, 'amount': buy_amount})
+            selected_stocks.append(stock)
+        elif top_stocks.loc[stock, 'predicted_return'] < SELL_THRESHOLD and stock in portfolio:
+            sell_value = portfolio[stock] * current_prices[stock]
+            cash += sell_value * (1 - TRANSACTION_COST)
+            del portfolio[stock]
+            trade_log.append({'time_step': time_step, 'action': 'sell', 'stock': stock, 'amount': sell_value})
+
+    selected_stock_history.append(selected_stocks)
+
+    # 记录总资产和其他指标
+    total_value = cash + sum(portfolio.get(stock, 0) * current_prices[stock] for stock in portfolio)
+    total_assets.append(total_value)
+    cash_history.append(cash)
+    portfolio_size_history.append(len(portfolio))
+
+# 计算每日收益率和夏普比率
+daily_returns = pd.Series(total_assets).pct_change().dropna()
+portfolio_mean_return = daily_returns.mean()
+portfolio_volatility = daily_returns.std()
+sharpe_ratio = (portfolio_mean_return - RISK_FREE_RATE / 252) / portfolio_volatility  # 年化无风险利率除以交易日
+
+# 可视化图形生成
+print("Generating visualizations...")
+with tqdm(total=1, desc="Plotting Visualizations") as pbar:
+    # 1. 绘制资金和资产变化与市场基准对比（无采样）
+    sampled_indices = np.arange(0, len(market_benchmark), 100)
+    sampled_market_benchmark = market_benchmark[sampled_indices]
+    sampled_average_price = test_data.iloc[sampled_indices].mean(axis=1)
+
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(total_assets, label="Total Assets (Simulation)", color="blue")
+    plt.plot((sampled_average_price / sampled_average_price.iloc[0]) * INIT_FUND, 
+             label="Market Benchmark (Sampled)", linestyle="--")
+    plt.axhline(y=INIT_FUND, color="gray", linestyle="--", label="Initial Fund")
+    plt.title("Total Assets vs Market Benchmark")
+    plt.xlabel("Time Steps")
+    plt.ylabel("Total Assets")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    pbar.update(1)
+
+    # 2. 绘制每日收益率直方图
+    plt.figure(figsize=(10, 5))
+    plt.hist(daily_returns, bins=50, color="skyblue", edgecolor="black")
+    plt.title("Histogram of Daily Returns")
+    plt.xlabel("Daily Return")
+    plt.ylabel("Frequency")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    
+    # 3. 显示夏普比率
+    print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+
+    # 4. 交易行为 - 保留完整交易日志数据
+    buy_trades = [t for t in trade_log if t['action'] == 'buy']
+    sell_trades = [t for t in trade_log if t['action'] == 'sell']
+
+    plt.figure(figsize=(14, 8))
+    plt.scatter([t['time_step'] for t in buy_trades],
+                [t['amount'] for t in buy_trades], label='Buy', color='green')
+    plt.scatter([t['time_step'] for t in sell_trades],
+                [t['amount'] for t in sell_trades], label='Sell', color='red')
+    plt.title("Trading Activity Over Time")
+    plt.xlabel("Time Steps (5-Min Intervals)")
+    plt.ylabel("Trade Amount")
+    plt.legend()
+    plt.show()
+    pbar.update(1)
+
+# 输出最终结果
+final_assets = total_assets[-1]
+total_return = (final_assets - INIT_FUND) / INIT_FUND
+print(f"Initial Capital: {INIT_FUND:.2f}")
+print(f"Final Assets: {final_assets:.2f}")
+print(f"Total Return: {total_return * 100:.2f}%")
+print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
