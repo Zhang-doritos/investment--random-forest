@@ -1,0 +1,53 @@
+print("Simulating trading...")
+for time_step in tqdm(range(1, len(test_data)), desc="Trading Simulation"):
+    current_prices = test_data.iloc[time_step]
+    past_prices = test_data.iloc[:time_step]
+
+    # 每 1000 步触发交易逻辑
+    if time_step % 1000 == 0:
+        # 计算特征
+        returns = past_prices.pct_change().dropna()
+        features = pd.DataFrame({
+            "mean_return": returns.mean(),
+            "volatility": returns.std(),
+            "total_return": (past_prices.iloc[-1] - past_prices.iloc[0]) / past_prices.iloc[0]
+        }).reset_index(drop=True)
+
+        # 模型预测
+        X_test = features[['mean_return', 'volatility']]
+        features['predicted_return'] = rf_model.predict(X_test)
+
+        # 添加股票名称列
+        features['Stock'] = test_data.columns
+
+        # 按预测收益排序并选择前20只股票
+        features = features.sort_values(by='predicted_return', ascending=False)
+        top_stocks = features.head(20)
+        selected_stocks = top_stocks['Stock'].tolist()
+
+        # 动态调整阈值
+        BUY_THRESHOLD, SELL_THRESHOLD = update_thresholds(features['predicted_return'], BASE_BUY_THRESHOLD, BASE_SELL_THRESHOLD)
+
+        available_cash = cash * 0.9
+        for stock in selected_stocks:
+            predicted_return = top_stocks.loc[top_stocks['Stock'] == stock, 'predicted_return'].values[0]
+            if predicted_return > BUY_THRESHOLD and stock not in portfolio:
+                buy_amount = available_cash * 0.05
+                shares_to_buy = buy_amount / current_prices[stock]
+                portfolio[stock] = shares_to_buy
+                cash -= buy_amount * (1 + TRANSACTION_COST)
+                trade_log.append({'time_step': time_step, 'action': 'buy', 'stock': stock, 'amount': buy_amount})
+            elif predicted_return < SELL_THRESHOLD and stock in portfolio:
+                sell_value = portfolio[stock] * current_prices[stock]
+                cash += sell_value * (1 - TRANSACTION_COST)
+                del portfolio[stock]
+                trade_log.append({'time_step': time_step, 'action': 'sell', 'stock': stock, 'amount': sell_value})
+
+        selected_stock_history.append(selected_stocks)
+
+    # 记录总资产（每个时间步，无论是否交易）
+    total_value = cash + sum(portfolio.get(stock, 0) * current_prices[stock] for stock in portfolio)
+    total_assets.append(total_value)
+    cash_history.append(cash)
+    portfolio_size_history.append(len(portfolio))
+    volatility_values.append(features['volatility'].mean() if time_step % 1000 == 0 else volatility_values[-1])
