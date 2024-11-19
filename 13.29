@@ -207,3 +207,99 @@ total_return = (final_assets - INIT_FUND) / INIT_FUND
 print(f"Initial Capital: {INIT_FUND:.2f}")
 print(f"Final Assets: {final_assets:.2f}")
 print(f"Total Return: {total_return * 100:.2f}%")
+
+# 投资组合分布分析
+if portfolio:
+    # 计算最终投资组合分布
+    final_portfolio_value = {stock: portfolio[stock] * stock_data.iloc[-1][stock] for stock in portfolio}
+    total_value = sum(final_portfolio_value.values())
+    portfolio_distribution = {stock: value / total_value for stock, value in final_portfolio_value.items()}
+    
+    # 绘制分布条形图
+    plt.figure(figsize=(14, 8))
+    plt.bar(portfolio_distribution.keys(), portfolio_distribution.values())
+    plt.title("Final Portfolio Distribution")
+    plt.xlabel("Stocks")
+    plt.ylabel("Proportion of Total Value")
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("No stocks held in the final portfolio.")
+
+# 回撤分析
+def calculate_drawdown(total_assets):
+    max_value = total_assets[0]
+    drawdowns = []
+    for value in total_assets:
+        if value > max_value:
+            max_value = value
+        drawdown = (max_value - value) / max_value
+        drawdowns.append(drawdown)
+    return drawdowns, max(drawdowns)
+
+# 计算回撤
+drawdowns, max_drawdown = calculate_drawdown(total_assets)
+
+# 绘制回撤图
+plt.figure(figsize=(14, 8))
+plt.plot(drawdowns, label="Drawdown")
+plt.title(f"Drawdown Over Time (Max Drawdown: {max_drawdown:.2%})")
+plt.xlabel("Time Steps")
+plt.ylabel("Drawdown")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f"Maximum Drawdown: {max_drawdown:.2%}")
+
+# 敏感性分析
+threshold_values = np.linspace(0.005, 0.03, 5)  # 调整阈值范围
+results = []
+
+for buy_threshold in threshold_values:
+    # 使用不同的买入阈值模拟收益
+    cash = INIT_FUND
+    portfolio = {}
+    total_assets_sensitivity = []
+
+    for time_step in range(1, len(stock_data)):
+        current_prices = stock_data.iloc[time_step]
+        if time_step % train_interval == 0 or rf_model is None:
+            returns = stock_data.iloc[:time_step].pct_change().dropna()
+            features = pd.DataFrame({
+                "mean_return": returns.mean(),
+                "volatility": returns.std()
+            }).reset_index(drop=True)
+            rf_model = RandomForestRegressor(n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH, random_state=42, n_jobs=-1)
+            rf_model.fit(features[['mean_return', 'volatility']], returns.mean(axis=1))
+        predicted_returns = rf_model.predict(features[['mean_return', 'volatility']])
+        
+        for stock, predicted_return in zip(stock_data.columns, predicted_returns):
+            if predicted_return > buy_threshold and stock not in portfolio:
+                buy_amount = cash * 0.05
+                shares_to_buy = buy_amount / current_prices[stock]
+                portfolio[stock] = shares_to_buy
+                cash -= buy_amount * (1 + TRANSACTION_COST)
+            elif predicted_return < BASE_SELL_THRESHOLD and stock in portfolio:
+                sell_value = portfolio[stock] * current_prices[stock]
+                cash += sell_value * (1 - TRANSACTION_COST)
+                del portfolio[stock]
+        
+        total_assets_sensitivity.append(calculate_total_assets(portfolio, cash, current_prices))
+    
+    final_assets_sensitivity = total_assets_sensitivity[-1]
+    results.append((buy_threshold, final_assets_sensitivity))
+
+# 绘制敏感性分析结果
+thresholds, final_values = zip(*results)
+plt.figure(figsize=(14, 8))
+plt.plot(thresholds, final_values, marker='o')
+plt.title("Sensitivity Analysis: Buy Threshold vs Final Portfolio Value")
+plt.xlabel("Buy Threshold")
+plt.ylabel("Final Portfolio Value")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
