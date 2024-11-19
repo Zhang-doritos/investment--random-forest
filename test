@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Nov 19 10:43:19 2024
+
+@author: doritos
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter
+from sklearn.ensemble import RandomForestRegressor
+import joblib
+
+# 固定初始参数
+INIT_FUND = 1e9
+
+# 读取数据
+test_data_path = "/Users/doritos/Documents/ELEC7089/forestregressor/stock_sma_1000.csv"
+test_data = pd.read_csv(test_data_path, index_col=0)
+test_data = test_data.iloc[47627:59484, :].copy()
+
+# 计算 Market Benchmark
+average_price = test_data.mean(axis=1)  # 每时间步所有股票的均价
+market_benchmark = (average_price / average_price.iloc[0]) * INIT_FUND  # 基准归一化到初始资金
+
+# 加载模型
+model_path = "/Users/doritos/Documents/ELEC7089/forestregressor/model_43ee0624e2c8335f3ca04d31b9924976best.pkl"
+rf_model = joblib.load(model_path)
+print("模型加载成功")
+
+# 初始化交易参数
+TRANSACTION_COST = 0.001
+BUY_THRESHOLD = 0.02
+SELL_THRESHOLD = -0.01
+
+cash = INIT_FUND
+portfolio = {}
+total_assets = []
+cash_history = []
+portfolio_size_history = []
+trade_log = []  # 用于记录交易
+train_intervals = []  # 用于记录训练间隔
+volatility_values = []  # 用于记录波动率
+selected_stock_history = []  # 记录每次筛选的股票
+
+# 开始模拟交易
+for time_step in range(1, len(test_data)):
+    current_prices = test_data.iloc[time_step]
+    past_prices = test_data.iloc[:time_step]
+
+    # 计算特征
+    returns = past_prices.pct_change().dropna()
+    features = pd.DataFrame({
+        "mean_return": returns.mean(),
+        "volatility": returns.std(),
+    }).reset_index(drop=True)
+
+    # 模型预测
+    X_test = features[['mean_return', 'volatility']]
+    features['predicted_return'] = rf_model.predict(X_test)
+
+    # 筛选交易的股票
+    selected_stocks = []
+    available_cash = cash * 0.9
+    for stock, predicted_return in zip(test_data.columns, features['predicted_return']):
+        if predicted_return > BUY_THRESHOLD and stock not in portfolio:
+            buy_amount = available_cash * 0.05
+            shares_to_buy = buy_amount / current_prices[stock]
+            portfolio[stock] = shares_to_buy
+            cash -= buy_amount * (1 + TRANSACTION_COST)
+            trade_log.append({'time_step': time_step, 'action': 'buy', 'stock': stock, 'amount': buy_amount})
+            selected_stocks.append(stock)
+        elif predicted_return < SELL_THRESHOLD and stock in portfolio:
+            sell_value = portfolio[stock] * current_prices[stock]
+            cash += sell_value * (1 - TRANSACTION_COST)
+            del portfolio[stock]
+            trade_log.append({'time_step': time_step, 'action': 'sell', 'stock': stock, 'amount': sell_value})
+
+    selected_stock_history.append(selected_stocks)
+
+    # 记录总资产和其他指标
+    total_value = cash + sum(portfolio.get(stock, 0) * current_prices[stock] for stock in portfolio)
+    total_assets.append(total_value)
+    cash_history.append(cash)
+    portfolio_size_history.append(len(portfolio))
+    volatility_values.append(features['volatility'].mean())
+
+# 绘制资金和资产变化与市场基准对比
+plt.figure(figsize=(12, 6))
+plt.plot(total_assets, label="Total Assets (Simulation)", color="blue")
+plt.plot(market_benchmark, label="Market Benchmark", color="orange")
+plt.axhline(y=INIT_FUND, color="gray", linestyle="--", label="Initial Fund")
+plt.title("Total Assets vs Market Benchmark")
+plt.xlabel("Time Steps")
+plt.ylabel("Total Assets")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# 2. 当前持仓分布
+if portfolio:
+    last_day_portfolio = {stock: shares for stock, shares in portfolio.items() if shares > 0}
+    portfolio_weights = {stock: shares * test_data.iloc[-1][stock] / total_assets[-1] 
+                         for stock, shares in last_day_portfolio.items()}
+    plt.bar(portfolio_weights.keys(), portfolio_weights.values())
+    plt.title("Portfolio Allocation")
+    plt.xlabel("Stocks")
+    plt.ylabel("Proportion of Total Value")
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    plt.show()
+
+# 3. 交易行为
+buy_trades = [t for t in trade_log if t['action'] == 'buy']
+sell_trades = [t for t in trade_log if t['action'] == 'sell']
+plt.scatter([t['time_step'] for t in buy_trades], 
+            [t['amount'] for t in buy_trades], label='Buy', color='green')
+plt.scatter([t['time_step'] for t in sell_trades], 
+            [t['amount'] for t in sell_trades], label='Sell', color='red')
+plt.title("Trading Activity Over Time")
+plt.xlabel("Time Steps")
+plt.ylabel("Trade Amount")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# 4. 训练间隔与波动率
+fig, ax1 = plt.subplots()
+ax2 = ax1.twinx()
+ax1.plot(range(len(volatility_values)), volatility_values, 'g-', label="Volatility")
+ax2.plot(range(len(volatility_values)), [t for t in range(len(volatility_values))], 'b--', label="Training Interval")
+ax1.set_xlabel("Time Steps")
+ax1.set_ylabel("Volatility", color='g')
+ax2.set_ylabel("Training Interval", color='b')
+plt.title("Training Interval and Volatility Over Time")
+plt.tight_layout()
+plt.show()
+
+# 5. 股票筛选频率热力图
+stock_selection_counts = Counter([stock for sublist in selected_stock_history for stock in sublist])
+heatmap_data = pd.DataFrame.from_dict(stock_selection_counts, orient='index', columns=['Count']).sort_values(by='Count', ascending=False)
+plt.figure(figsize=(10, 8))
+sns.heatmap(heatmap_data, annot=True, cmap="YlGnBu")
+plt.title("Top Selected Stocks Frequency", fontsize=16)
+plt.xlabel("Selection Count", fontsize=12)
+plt.ylabel("Stocks", fontsize=12)
+plt.xticks(rotation=90)
+plt.yticks(rotation=0)
+plt.tight_layout()
+plt.show()
+
+# 输出最终结果
+final_assets = total_assets[-1]
+total_return = (final_assets - INIT_FUND) / INIT_FUND
+print(f"Initial Capital: {INIT_FUND:.2f}")
+print(f"Final Assets: {final_assets:.2f}")
+print(f"Total Return: {total_return * 100:.2f}%")
