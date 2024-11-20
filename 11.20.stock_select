@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Nov 20 15:46:30 2024
+
+@author: doritos
+"""
+
+import numpy as np
+import pandas as pd
+from joblib import load
+import pandas as pd
+import numpy as np
+
+
+# 加载已训练的模型
+model_filename = "random_forest_model_1470_1470_1470.pkl"
+model = load(model_filename)
+
+# 假设输入数据为10000x100的DataFrame
+data = pd.read_csv("/Users/doritos/Documents/ELEC7089/11.19/test_stock_sma_20.csv", index_col=0)
+data = data.iloc[100:, :].copy()
+data = pd.DataFrame(data)
+
+# 定义函数：滑动窗口提取特征
+def extract_features(data, start_idx, window_size=735):
+    """
+    从输入数据中提取特征。
+    每次处理 window_size 的数据。
+    """
+    window_data = data.iloc[start_idx:start_idx + window_size, :]
+    returns = window_data.pct_change().dropna()  # 计算收益率
+    feature = pd.DataFrame({
+        "mean_return": returns.mean(),
+        "volatility": returns.std(),
+        "total_return": (window_data.iloc[-1] - window_data.iloc[0]) / window_data.iloc[0]
+    }).T.values.flatten()  # 将特征展平为1D数组
+    return feature
+
+# 定义函数：计算实际收益率
+def calculate_actual_returns(data, start_idx, future_steps=735):
+    """
+    计算从 start_idx 开始的未来收益率 (实际收益率)。
+    """
+    current_prices = data.iloc[start_idx, :]
+    future_prices = data.iloc[start_idx + future_steps, :]
+    returns = (future_prices - current_prices) / current_prices
+    return returns.values.flatten()  # 返回为一维数组
+
+
+# 分步预测
+window_size = 735  # 每次处理1000步数据作为特征
+future_steps = 735  # 预测未来1000步后的收益率
+num_predictions = 10  # 需要预测的次数
+predicted_returns = []
+actual_returns = []
+
+
+# 迭代预测，每次间隔1000步
+for step in range(1, num_predictions + 1):
+    start_idx = (step-1) * window_size  # 每次间隔1000步预测
+    if start_idx + window_size + future_steps > len(data):
+        break  # 防止超出数据范围
+    
+    # 提取特征
+    features = extract_features(data, start_idx, window_size=window_size)
+    features = features.reshape(1, -1)  # 调整为模型输入格式
+
+    # 预测未来1000步后的收益率
+    prediction = model.predict(features)
+    predicted_returns.append(prediction.flatten())  # 保存每次预测的结果
+    # 计算实际未来1000步收益率
+    actual_return = calculate_actual_returns(data, start_idx + window_size, future_steps=future_steps)
+    actual_returns.append(actual_return)  # 每次的实际收益率存储
+
+# 将预测结果转换为数组
+predicted_returns = np.array(predicted_returns)  # (n_steps, 100)
+actual_returns = np.array(actual_returns)       # (n_steps, 100)
+
+from sklearn.metrics import mean_squared_error
+from scipy.stats import pearsonr
+
+# 计算 MSE 和相关性
+mse = mean_squared_error(predicted_returns.flatten(), actual_returns.flatten())
+
+# 计算相关性
+correlation, _ = pearsonr(predicted_returns.flatten(), actual_returns.flatten())
+
+# 为数组加上表头
+columns = [f"Stock_{i+1}" for i in range(100)]  # 从 Stock_1 到 Stock_100
+predicted_df = pd.DataFrame(predicted_returns, columns=columns)  # 添加表头
+actual_df = pd.DataFrame(actual_returns, columns=columns)  # 添加表头
+
+# 找到每行收益率最高的20只股票
+top_20_predicted = []
+top_20_actual = []
+
+for i in range(predicted_df.shape[0]):  # 遍历每一行
+    # 对 predicted 返回最高的20只股票名称
+    top_20_predicted.append(predicted_df.iloc[i].nlargest(20).index.tolist())
+    
+    # 对 actual 返回最高的20只股票名称
+    top_20_actual.append(actual_df.iloc[i].nlargest(20).index.tolist())
+
+# 将结果转换为数组
+top_20_predicted = np.array(top_20_predicted)  # (n_steps, 20)
+top_20_actual = np.array(top_20_actual)  # (n_steps, 20)
+
+# 将数据转换为 DataFrame
+df = pd.DataFrame(top_20_predicted, columns=[f"Predicted_{i+1}" for i in range(20)])
+
+# 保存为CSV文件
+file_path = "top_20_predicted.csv"
+df.to_csv(file_path, index=False)
